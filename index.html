@@ -38,7 +38,9 @@
       margin-bottom: 0.75rem;
     }
   </style>
-  <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.min.js"></script>
+
+  <!-- ✅ Load ethers.js FIRST -->
+  <script src="https://unpkg.com/ethers@5.7.2/dist/ethers.umd.min.js"></script>
 </head>
 <body>
   <h1>🔒 Time Lock Safe</h1>
@@ -59,7 +61,6 @@
 
   <div class="card">
     <h3>Create a new lock</h3>
-
     <label>Token contract address (PRC-20 / ERC-20)</label>
     <input id="tokenAddress" placeholder="0x..." />
 
@@ -81,9 +82,8 @@
     <div id="locksList" class="muted">Connect wallet to load locks.</div>
   </div>
 
+  <!-- ✅ Your main app script -->
   <script>
-  // === Configuration ===
-  // This is your deployed TimeLockSafe contract address on PulseChain:
   const DEFAULT_CONTRACT_ADDRESS = "0x64b280cEa1a08c6cea1EB5b441b2D81d2EF996BE";
 
   const ABI = [
@@ -91,50 +91,34 @@
     "function withdraw(uint256 lockId) external",
     "function getLockCount(address depositor) external view returns (uint256)",
     "function getLock(address depositor, uint256 index) external view returns (address token, uint256 amount, uint256 unlockTime, bool withdrawn)",
-    "function getLocksRange(address depositor, uint256 start, uint256 end) external view returns (address[] tokens, uint256[] amounts, uint256[] unlockTimes, bool[] withdrawn)",
     "event Locked(address indexed depositor, uint256 indexed lockId, address indexed token, uint256 amount, uint256 unlockTime)",
     "event Withdrawn(address indexed depositor, uint256 indexed lockId, address indexed token, uint256 amount)"
   ];
 
-  let provider;
-  let signer;
-  let contract;
-  let userAddress;
+  let provider, signer, contract, userAddress;
 
-  // Initialize on page load
   async function init() {
-    // 1. Check wallet injection
     if (typeof window.ethereum === "undefined") {
-      const walletArea = document.getElementById("walletArea");
-      walletArea.innerHTML = `
+      document.getElementById("walletArea").innerHTML = `
         <b>No wallet detected.</b><br/>
-        Open this page in a browser with MetaMask / OKX wallet installed (desktop),
+        Open this page in a browser with MetaMask / OKX wallet installed
         or in the in-app browser of your wallet.
       `;
       return;
     }
 
-    // 2. Create provider
     provider = new ethers.providers.Web3Provider(window.ethereum, "any");
-
-    // 3. Wire up buttons
     document.getElementById("connectBtn").addEventListener("click", connectWallet);
     document.getElementById("approveAndLockBtn").addEventListener("click", approveAndLock);
-
-    // We instantiate the contract after connect, once we have a signer.
   }
 
-  // Connect wallet, set signer, attach contract, load locks
   async function connectWallet() {
     try {
-      // Ask wallet to connect
       await window.ethereum.request({ method: "eth_requestAccounts" });
-
       provider = new ethers.providers.Web3Provider(window.ethereum, "any");
       signer = provider.getSigner();
       userAddress = await signer.getAddress();
 
-      // UI updates
       document.getElementById("addr").textContent = userAddress;
       document.getElementById("connectBtn").style.display = "none";
       document.getElementById("connected").style.display = "block";
@@ -142,103 +126,43 @@
       const network = await provider.getNetwork();
       document.getElementById("network").textContent = `${network.name} (chainId ${network.chainId})`;
 
-      // Determine which contract address to use:
-      const params = new URLSearchParams(window.location.search);
-      const qsContract = params.get("contract");
-
-      let targetContractAddr = qsContract || DEFAULT_CONTRACT_ADDRESS;
-
-      if (
-        !ethers.utils.isAddress(targetContractAddr) ||
-        targetContractAddr === "0x0000000000000000000000000000000000000000"
-      ) {
-        alert(
-          "You have not set a valid contract address yet.\n" +
-          "Edit DEFAULT_CONTRACT_ADDRESS in index.html or use ?contract=0x..."
-        );
-        return;
-      }
-
-      // Instantiate contract with signer so we can call tx functions
-      contract = new ethers.Contract(targetContractAddr, ABI, signer);
-
-      // Now we can load the locks for this wallet
+      contract = new ethers.Contract(DEFAULT_CONTRACT_ADDRESS, ABI, signer);
       await loadLocks();
-
     } catch (err) {
       console.error(err);
-      alert("Could not connect wallet: " + (err && err.message ? err.message : err));
+      alert("Could not connect wallet: " + (err.message || err));
     }
   }
 
-  // Helper: amount string -> raw amount based on token.decimals()
   async function toRawAmount(tokenAddr, humanAmountStr) {
-    const token = new ethers.Contract(
-      tokenAddr,
-      ["function decimals() view returns (uint8)"],
-      provider
-    );
+    const token = new ethers.Contract(tokenAddr, ["function decimals() view returns (uint8)"], provider);
     let decimals = 18;
-    try {
-      decimals = await token.decimals();
-    } catch (e) {
-      // fallback 18 if token doesn't behave
-    }
+    try { decimals = await token.decimals(); } catch (e) {}
     return ethers.utils.parseUnits(humanAmountStr, decimals);
   }
 
-  // Approve tokens to the TimeLockSafe, then create the lock
   async function approveAndLock() {
-    if (!signer || !contract || !userAddress) {
-      alert("Connect wallet first.");
-      return;
-    }
-
+    if (!signer || !contract || !userAddress) return alert("Connect wallet first.");
     const tokenAddr = document.getElementById("tokenAddress").value.trim();
     const amountStr = document.getElementById("amount").value.trim();
     const whenLocal = document.getElementById("when").value;
+    if (!ethers.utils.isAddress(tokenAddr)) return alert("Invalid token address");
+    if (!amountStr || isNaN(Number(amountStr))) return alert("Invalid amount");
+    if (!whenLocal) return alert("Select unlock date/time");
 
-    if (!ethers.utils.isAddress(tokenAddr)) {
-      alert("Invalid token address");
-      return;
-    }
-    if (!amountStr || isNaN(Number(amountStr))) {
-      alert("Invalid amount");
-      return;
-    }
-    if (!whenLocal) {
-      alert("Select unlock date/time");
-      return;
-    }
-
-    // Convert local datetime-local -> unix seconds
-    const whenDate = new Date(whenLocal); // local time interpreted by browser
+    const whenDate = new Date(whenLocal);
     const unlockTs = Math.floor(whenDate.getTime() / 1000);
-    const nowTs = Math.floor(Date.now() / 1000);
-    if (unlockTs <= nowTs) {
-      alert("Unlock time must be in the future.");
-      return;
-    }
+    if (unlockTs <= Math.floor(Date.now() / 1000)) return alert("Unlock time must be in the future.");
 
     const statusEl = document.getElementById("txStatus");
     statusEl.textContent = "Preparing approval & lock...";
-
     try {
-      // Convert the human-readable amount into raw token units
       const raw = await toRawAmount(tokenAddr, amountStr);
-
-      // 1) Approve
-      const erc20 = new ethers.Contract(
-        tokenAddr,
-        ["function approve(address spender, uint256 amount) public returns (bool)"],
-        signer
-      );
-
+      const erc20 = new ethers.Contract(tokenAddr, ["function approve(address spender, uint256 amount) public returns (bool)"], signer);
       const approveTx = await erc20.approve(contract.address, raw);
       statusEl.textContent = "Waiting for approval confirmation...";
       await approveTx.wait();
 
-      // 2) Lock the tokens in the contract
       const lockTx = await contract.lockTokens(tokenAddr, raw, unlockTs);
       statusEl.textContent = "Lock transaction sent, waiting for confirmation...";
       await lockTx.wait();
@@ -247,126 +171,86 @@
       await loadLocks();
     } catch (err) {
       console.error(err);
-      statusEl.textContent = "Error: " + (err && err.message ? err.message : err);
-      alert("Error during approve/lock: " + (err && err.message ? err.message : err));
+      statusEl.textContent = "Error: " + (err.message || err);
+      alert("Error: " + (err.message || err));
     }
   }
 
-  // Fetch all locks for this wallet from the contract
   async function loadLocks() {
     const listEl = document.getElementById("locksList");
     listEl.textContent = "Loading locks...";
-
     try {
-      const countBN = await contract.getLockCount(userAddress);
-      const count = countBN.toNumber ? countBN.toNumber() : Number(countBN);
-
-      if (count === 0) {
-        listEl.innerHTML = "<div class='muted'>No locks for this address.</div>";
+      const count = await contract.getLockCount(userAddress);
+      const n = count.toNumber ? count.toNumber() : Number(count);
+      if (n === 0) {
+        listEl.innerHTML = "<div class='muted'>No locks found.</div>";
         return;
       }
-
       const items = [];
-      for (let i = 0; i < count; i++) {
+      for (let i=0; i<n; i++){
         const res = await contract.getLock(userAddress, i);
-        items.push({
-          index: i,
-          token: res[0],
-          amount: res[1].toString(),
-          unlockTime: Number(res[2]),
-          withdrawn: res[3]
-        });
+        items.push({ index:i, token:res[0], amount:res[1].toString(), unlockTime:Number(res[2]), withdrawn:res[3] });
       }
-
       renderLocks(items);
-    } catch (err) {
-      console.error(err);
-      listEl.textContent =
-        "Error loading locks: " +
-        (err && err.message ? err.message : err);
+    } catch (e) {
+      console.error(e);
+      listEl.textContent = "Error loading locks: " + (e.message || e);
     }
   }
 
-  // Render each lock with countdown + withdraw button
   function renderLocks(items) {
-    const listEl = document.getElementById("locksList");
-    listEl.innerHTML = "";
-
-    items.forEach(item => {
-      const wrapper = document.createElement("div");
-      wrapper.className = "lock-item card";
-
-      const head = document.createElement("div");
-      head.innerHTML = `<b>Lock #${item.index}</b> <div class="small muted">Token: ${item.token}</div>`;
-      wrapper.appendChild(head);
-
-      const amt = document.createElement("div");
-      amt.className = "small muted";
-      amt.textContent = `Amount (raw units): ${item.amount}`;
-      wrapper.appendChild(amt);
-
-      const unlockDate = new Date(item.unlockTime * 1000);
-      const unlockDiv = document.createElement("div");
-      unlockDiv.textContent = `Unlocks (UTC): ${unlockDate.toUTCString()}`;
-      wrapper.appendChild(unlockDiv);
-
-      const statusDiv = document.createElement("div");
-      statusDiv.id = `status-${item.index}`;
-      wrapper.appendChild(statusDiv);
-
-      const countdownDiv = document.createElement("div");
-      countdownDiv.className = "small";
-      wrapper.appendChild(countdownDiv);
-
+    const out = document.getElementById("locksList");
+    out.innerHTML = "";
+    items.forEach(item=>{
+      const wrap = document.createElement("div");
+      wrap.className = "lock-item card";
+      wrap.innerHTML = `
+        <b>Lock #${item.index}</b><br/>
+        <div class='small muted'>Token: ${item.token}</div>
+        <div class='small muted'>Amount (raw units): ${item.amount}</div>
+        <div>Unlocks (UTC): ${new Date(item.unlockTime*1000).toUTCString()}</div>
+      `;
+      const status = document.createElement("div");
+      wrap.appendChild(status);
       const btn = document.createElement("button");
       btn.textContent = "Withdraw";
       btn.disabled = true;
-      btn.addEventListener("click", async () => {
+      wrap.appendChild(btn);
+      const countdown = document.createElement("div");
+      countdown.className = "small";
+      wrap.appendChild(countdown);
+      out.appendChild(wrap);
+
+      btn.addEventListener("click", async ()=>{
         btn.disabled = true;
-        statusDiv.textContent = "Sending withdraw tx...";
+        status.textContent = "Withdrawing...";
         try {
           const tx = await contract.withdraw(item.index);
-          statusDiv.textContent = "Tx sent — waiting...";
+          status.textContent = "Tx sent — waiting...";
           await tx.wait();
-          statusDiv.textContent = "✅ Withdrawn on-chain.";
+          status.textContent = "✅ Withdrawn.";
           loadLocks();
-        } catch (err) {
+        } catch(err){
           console.error(err);
-          statusDiv.textContent =
-            "Error: " + (err && err.message ? err.message : err);
+          status.textContent = "Error: " + (err.message||err);
           btn.disabled = false;
         }
       });
-      wrapper.appendChild(btn);
 
-      listEl.appendChild(wrapper);
-      wrapper.appendChild(countdownDiv);
-
-      // live countdown updater
-      const timer = setInterval(() => {
-        const now = Math.floor(Date.now() / 1000);
-
-        if (item.withdrawn) {
-          countdownDiv.innerHTML = "<span class='green'>Already withdrawn</span>";
-          btn.disabled = true;
-          clearInterval(timer);
-          return;
+      const timer = setInterval(()=>{
+        const now = Math.floor(Date.now()/1000);
+        if(item.withdrawn){
+          countdown.innerHTML = "<span class='green'>Already withdrawn</span>";
+          btn.disabled = true; clearInterval(timer); return;
         }
-
-        if (now >= item.unlockTime) {
-          countdownDiv.innerHTML = "<span class='green'>Ready to withdraw</span>";
-          btn.disabled = false;
-          return;
+        if(now>=item.unlockTime){
+          countdown.innerHTML = "<span class='green'>Ready to withdraw</span>";
+          btn.disabled = false; return;
         }
-
-        const secs = item.unlockTime - now;
-        const days = Math.floor(secs / 86400);
-        const hrs = Math.floor((secs % 86400) / 3600);
-        const mins = Math.floor((secs % 3600) / 60);
-        const s = secs % 60;
-        countdownDiv.textContent =
-          `Time remaining: ${days}d ${hrs}h ${mins}m ${s}s`;
-      }, 1000);
+        const sec=item.unlockTime-now;
+        const d=Math.floor(sec/86400),h=Math.floor((sec%86400)/3600),m=Math.floor((sec%3600)/60),s=sec%60;
+        countdown.textContent=`Time remaining: ${d}d ${h}h ${m}m ${s}s`;
+      },1000);
     });
   }
 
