@@ -39,13 +39,13 @@
     }
   </style>
 
-  <!-- ✅ Load ethers.js FIRST -->
+  <!-- ✅ Load ethers.js first -->
   <script src="https://unpkg.com/ethers@5.7.2/dist/ethers.umd.min.js"></script>
 </head>
 <body>
   <h1>🔒 Time Lock Safe</h1>
   <p class="muted">
-    Lock any PRC-20 token until an exact future date/time (UTC).
+    Lock any PRC-20 token until an exact future date/time (UTC).<br>
     Only you can withdraw, and only after the unlock time.
   </p>
 
@@ -82,7 +82,6 @@
     <div id="locksList" class="muted">Connect wallet to load locks.</div>
   </div>
 
-  <!-- ✅ Your main app script -->
   <script>
   const DEFAULT_CONTRACT_ADDRESS = "0x64b280cEa1a08c6cea1EB5b441b2D81d2EF996BE";
 
@@ -107,7 +106,8 @@
       return;
     }
 
-    provider = new ethers.providers.Web3Provider(window.ethereum, "any");
+    // ✅ Explicitly set PulseChain mainnet to prevent ENS warning
+    provider = new ethers.providers.Web3Provider(window.ethereum, { name: "pulsechain", chainId: 369 });
     document.getElementById("connectBtn").addEventListener("click", connectWallet);
     document.getElementById("approveAndLockBtn").addEventListener("click", approveAndLock);
   }
@@ -115,7 +115,7 @@
   async function connectWallet() {
     try {
       await window.ethereum.request({ method: "eth_requestAccounts" });
-      provider = new ethers.providers.Web3Provider(window.ethereum, "any");
+      provider = new ethers.providers.Web3Provider(window.ethereum, { name: "pulsechain", chainId: 369 });
       signer = provider.getSigner();
       userAddress = await signer.getAddress();
 
@@ -124,7 +124,7 @@
       document.getElementById("connected").style.display = "block";
 
       const network = await provider.getNetwork();
-      document.getElementById("network").textContent = `${network.name} (chainId ${network.chainId})`;
+      document.getElementById("network").textContent = `PulseChain (chainId ${network.chainId})`;
 
       contract = new ethers.Contract(DEFAULT_CONTRACT_ADDRESS, ABI, signer);
       await loadLocks();
@@ -163,7 +163,8 @@
       statusEl.textContent = "Waiting for approval confirmation...";
       await approveTx.wait();
 
-      const lockTx = await contract.lockTokens(tokenAddr, raw, unlockTs);
+      // Gas limit override (helps with certain tokens)
+      const lockTx = await contract.lockTokens(tokenAddr, raw, unlockTs, { gasLimit: 300000 });
       statusEl.textContent = "Lock transaction sent, waiting for confirmation...";
       await lockTx.wait();
 
