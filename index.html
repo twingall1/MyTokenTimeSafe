@@ -1,12 +1,255 @@
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html>
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Token Locker Demo</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>🔒 Time Lock Safe</title>
+  <style>
+    body { font-family: Arial, system-ui; max-width:900px; margin:2rem auto; color:#222; background:#f7f8fb; }
+    .card { background:white; padding:1rem; margin-bottom:1rem; border-radius:8px; box-shadow:0 1px 4px rgba(0,0,0,0.06); }
+    input, button, select { font-size:1rem; padding:0.5rem; margin:0.25rem 0; width:100%; box-sizing:border-box; }
+    .row { display:flex; gap:0.5rem; }
+    .col { flex:1; }
+    .muted { color:#666; font-size:0.9rem; }
+    .small { font-size:0.85rem; color:#333; }
+    .green { color: #0a8; }
+    .red { color: #d00; }
+    .lock-item { border-left:4px solid #eee; padding-left:0.75rem; margin-bottom:0.75rem;}
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.min.js"></script>
 </head>
 <body>
-  <h1>Hello from GitHub Pages!</h1>
-  <p>Your token-locker dApp will go here.</p>
+  <h1>🔒 Time Lock Safe</h1>
+  <p class="muted">Lock any PRC-20 token until an exact date/time (UTC). Withdraw only by the depositor after the unlock time.</p>
+
+  <div class="card">
+    <div id="walletArea">
+      <button id="connectBtn">Connect Wallet</button>
+      <div id="connected" style="display:none;">
+        <div class="small">Connected: <span id="addr"></span></div>
+        <div class="small muted">Network: <span id="network"></span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Create a new lock</h3>
+    <label>Token contract address (PRC-20 / ERC-20)</label>
+    <input id="tokenAddress" placeholder="0x..." />
+
+    <label>Amount (raw token units — decimals handled automatically)</label>
+    <input id="amount" placeholder="100.0" />
+
+    <label>Unlock date & time (UTC)</label>
+    <!-- datetime-local returns local time — we will convert to UTC timestamp in JS -->
+    <input id="when" type="datetime-local" />
+
+    <button id="approveAndLockBtn">Approve & Lock</button>
+    <div id="txStatus" class="muted"></div>
+    <div class="muted small">Tip: test with a short interval first (e.g., +2 minutes).</div>
+  </div>
+
+  <div class="card">
+    <h3>Your locks</h3>
+    <div id="locksList" class="muted">Connect wallet to load locks.</div>
+  </div>
+
+  <script>
+  // === Configuration - update DEFAULT_CONTRACT_ADDRESS after deployment ===
+  const DEFAULT_CONTRACT_ADDRESS = "0x64b280cEa1a08c6cea1EB5b441b2D81d2EF996BE"; // replace after deploy
+  const ABI = [
+    "function lockTokens(address token, uint256 amount, uint256 unlockTime) external",
+    "function withdraw(uint256 lockId) external",
+    "function getLockCount(address depositor) external view returns (uint256)",
+    "function getLock(address depositor, uint256 index) external view returns (address token, uint256 amount, uint256 unlockTime, bool withdrawn)",
+    "function getLocksRange(address depositor, uint256 start, uint256 end) external view returns (address[] tokens, uint256[] amounts, uint256[] unlockTimes, bool[] withdrawn)",
+    "event Locked(address indexed depositor, uint256 indexed lockId, address indexed token, uint256 amount, uint256 unlockTime)",
+    "event Withdrawn(address indexed depositor, uint256 indexed lockId, address indexed token, uint256 amount)"
+  ];
+
+  let provider, signer, contract, userAddress;
+
+  async function init() {
+    if (typeof window.ethereum === "undefined") {
+      document.getElementById("walletArea").innerHTML = "<b>MetaMask/OKX wallet not found — install one to use this dApp.</b>";
+      return;
+    }
+    provider = new ethers.providers.Web3Provider(window.ethereum, "any");
+    document.getElementById("connectBtn").addEventListener("click", connectWallet);
+    document.getElementById("approveAndLockBtn").addEventListener("click", approveAndLock);
+    // auto read querystring
+    const params = new URLSearchParams(window.location.search);
+    const contractAddr = params.get("contract") || DEFAULT_CONTRACT_ADDRESS;
+    if (contractAddr && contractAddr !== "0x0000000000000000000000000000000000000000") {
+      contract = new ethers.Contract(contractAddr, ABI, provider);
+    }
+  }
+
+  async function connectWallet() {
+    try {
+      await provider.send("eth_requestAccounts", []);
+      signer = provider.getSigner();
+      userAddress = await signer.getAddress();
+      document.getElementById("addr").textContent = userAddress;
+      document.getElementById("connectBtn").style.display = "none";
+      document.getElementById("connected").style.display = "block";
+      const network = await provider.getNetwork();
+      document.getElementById("network").textContent = `${network.name} (chainId ${network.chainId})`;
+      // If contract not set from query, use default
+      if (!contract) {
+        contract = new ethers.Contract(DEFAULT_CONTRACT_ADDRESS, ABI, provider);
+      }
+      // attach signer wrapper for txs
+      contract = contract.connect(signer);
+      loadLocks();
+    } catch (e) {
+      console.error(e);
+      alert("Could not connect wallet: " + (e && e.message));
+    }
+  }
+
+  // utility: convert token amount (human) to raw based on decimals
+  async function toRawAmount(tokenAddr, humanAmountStr) {
+    const token = new ethers.Contract(tokenAddr, ["function decimals() view returns (uint8)"], provider);
+    const decimals = await token.decimals().catch(()=>18);
+    const parsed = ethers.utils.parseUnits(humanAmountStr, decimals);
+    return parsed;
+  }
+
+  async function approveAndLock() {
+    const tokenAddr = document.getElementById("tokenAddress").value.trim();
+    const amountStr = document.getElementById("amount").value.trim();
+    const whenLocal = document.getElementById("when").value;
+    if (!ethers.utils.isAddress(tokenAddr)) return alert("Invalid token address");
+    if (!amountStr || isNaN(Number(amountStr))) return alert("Invalid amount");
+    if (!whenLocal) return alert("Select unlock date/time");
+
+    // convert local datetime to unix UTC timestamp
+    const whenDate = new Date(whenLocal);
+    const unlockTs = Math.floor(whenDate.getTime() / 1000);
+    if (unlockTs <= Math.floor(Date.now() / 1000)) return alert("Unlock must be future");
+
+    document.getElementById("txStatus").textContent = "Preparing approval & lock...";
+
+    try {
+      const raw = await toRawAmount(tokenAddr, amountStr);
+      // approve
+      const erc20 = new ethers.Contract(tokenAddr, ["function approve(address spender, uint256 amount) public returns (bool)"], signer);
+      const approveTx = await erc20.approve(contract.address, raw);
+      document.getElementById("txStatus").textContent = "Waiting for approve confirmation...";
+      await approveTx.wait();
+      // call lockTokens
+      const tx = await contract.lockTokens(tokenAddr, raw, unlockTs);
+      document.getElementById("txStatus").textContent = "Lock tx sent, waiting for confirmation...";
+      await tx.wait();
+      document.getElementById("txStatus").textContent = "Lock created — reload locks.";
+      setTimeout(()=>loadLocks(), 1200);
+    } catch (err) {
+      console.error(err);
+      document.getElementById("txStatus").textContent = "Error: " + (err && err.message);
+      alert("Error during approve/lock: " + (err && err.message));
+    }
+  }
+
+  async function loadLocks() {
+    if (!contract || !userAddress) return;
+    document.getElementById("locksList").innerHTML = "Loading locks...";
+    try {
+      const count = await contract.getLockCount(userAddress);
+      const n = count.toNumber ? count.toNumber() : Number(count);
+      if (n === 0) {
+        document.getElementById("locksList").innerHTML = "<div class='muted'>No locks found for this address.</div>";
+        return;
+      }
+      // fetch in batches (safe)
+      const items = [];
+      for (let i=0;i<n;i++){
+        const res = await contract.getLock(userAddress, i);
+        items.push({ index:i, token:res[0], amount:res[1].toString(), unlockTime:Number(res[2]), withdrawn:res[3] });
+      }
+      renderLocks(items);
+    } catch(e) {
+      console.error(e);
+      document.getElementById("locksList").innerText = "Error loading locks: " + (e.message || e);
+    }
+  }
+
+  function renderLocks(items) {
+    const out = document.getElementById("locksList");
+    out.innerHTML = "";
+    items.forEach(item=>{
+      const wrapper = document.createElement("div");
+      wrapper.className = "lock-item card";
+      // humanize amount (try decimals)
+      const tokenInfo = document.createElement("div");
+      tokenInfo.innerHTML = `<b>Lock #${item.index}</b> - token: <span class="small">${item.token}</span>`;
+      wrapper.appendChild(tokenInfo);
+
+      const amountDiv = document.createElement("div");
+      amountDiv.className = "small muted";
+      amountDiv.textContent = `Amount (raw): ${item.amount}`;
+      wrapper.appendChild(amountDiv);
+
+      const ut = new Date(item.unlockTime*1000);
+      const dateDiv = document.createElement("div");
+      dateDiv.textContent = `Unlocks (UTC): ${ut.toUTCString()}`;
+      wrapper.appendChild(dateDiv);
+
+      const statusDiv = document.createElement("div");
+      statusDiv.id = `status-${item.index}`;
+      wrapper.appendChild(statusDiv);
+
+      const btn = document.createElement("button");
+      btn.textContent = "Withdraw";
+      btn.disabled = true;
+      btn.addEventListener("click", async ()=> {
+        btn.disabled = true;
+        statusDiv.textContent = "Sending withdraw tx...";
+        try {
+          const tx = await contract.withdraw(item.index);
+          statusDiv.textContent = "Tx sent — waiting...";
+          await tx.wait();
+          statusDiv.textContent = "Withdrawn — confirmed on chain.";
+          loadLocks();
+        } catch(err) {
+          statusDiv.textContent = "Error: " + (err && err.message);
+          btn.disabled = false;
+        }
+      });
+      wrapper.appendChild(btn);
+
+      // countdown
+      const countdown = document.createElement("div");
+      countdown.className = "small";
+      wrapper.appendChild(countdown);
+
+      out.appendChild(wrapper);
+
+      // update countdown every second
+      const timer = setInterval(()=> {
+        const now = Math.floor(Date.now()/1000);
+        if (item.withdrawn) {
+          countdown.innerHTML = "<span class='green'>Already withdrawn</span>";
+          btn.disabled = true;
+          clearInterval(timer);
+          return;
+        }
+        if (now >= item.unlockTime) {
+          countdown.innerHTML = "<span class='green'>Ready to withdraw</span>";
+          btn.disabled = false;
+          return;
+        }
+        const secs = item.unlockTime - now;
+        const days = Math.floor(secs / 86400);
+        const hrs = Math.floor((secs % 86400) / 3600);
+        const mins = Math.floor((secs % 3600) / 60);
+        const s = secs % 60;
+        countdown.textContent = `Time remaining: ${days}d ${hrs}h ${mins}m ${s}s`;
+      }, 1000);
+    });
+  }
+
+  window.addEventListener('load', init);
+  </script>
 </body>
 </html>
