@@ -199,18 +199,32 @@
     }
   }
 
-  function renderLocks(items) {
+  // ✅ FIXED VERSION — displays correct human-readable amount
+  async function renderLocks(items) {
     const out = document.getElementById("locksList");
     out.innerHTML = "";
-    items.forEach(item=>{
+
+    for (const item of items) {
       const wrap = document.createElement("div");
       wrap.className = "lock-item card";
+
+      let decimals = 18;
+      try {
+        const tokenContract = new ethers.Contract(item.token, ["function decimals() view returns (uint8)"], provider);
+        decimals = await tokenContract.decimals();
+      } catch (err) {
+        console.warn("Could not read decimals for", item.token, "- using 18");
+      }
+
+      const humanAmount = ethers.utils.formatUnits(item.amount, decimals);
+
       wrap.innerHTML = `
         <b>Lock #${item.index}</b><br/>
         <div class='small muted'>Token: ${item.token}</div>
-        <div class='small muted'>Amount (raw units): ${item.amount}</div>
-        <div>Unlocks (UTC): ${new Date(item.unlockTime*1000).toUTCString()}</div>
+        <div class='small muted'>Amount: ${humanAmount}</div>
+        <div>Unlocks (UTC): ${new Date(item.unlockTime * 1000).toUTCString()}</div>
       `;
+
       const status = document.createElement("div");
       wrap.appendChild(status);
       const btn = document.createElement("button");
@@ -252,7 +266,7 @@
         const d=Math.floor(sec/86400),h=Math.floor((sec%86400)/3600),m=Math.floor((sec%3600)/60),s=sec%60;
         countdown.textContent=`Time remaining: ${d}d ${h}h ${m}m ${s}s`;
       },1000);
-    });
+    }
   }
 
   window.addEventListener("load", init);
